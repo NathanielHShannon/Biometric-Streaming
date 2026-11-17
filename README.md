@@ -1,6 +1,6 @@
 # Biometric Streaming
 
-A horror-themed on-screen overlay that shows live biometrics: heart rate, skin conductance (GSR) and EEG alpha. It's a single HTML file with a transparent background, so it can sit on top of video in OBS or any tool that accepts a browser source.
+A screen overlay that shows live biometrics: heart rate, skin conductance (GSR) and EEG alpha. It's a single HTML file with a transparent background, so it can sit on top of video in OBS or any tool that accepts a browser source.
 
 **Status: mockup.** All readings are simulated. No sensor hardware is connected yet.
 
