@@ -1,0 +1,846 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Biometric Overlay</title>
+<!--
+  BIOMETRIC STREAM OVERLAY (mockup, simulated data)
+  ------------------------------------------------
+  - Transparent 1920x1080 page for an OBS Browser Source.
+  - All readings are SIMULATED and live only in memory: nothing is saved, logged or sent anywhere.
+    The only thing stored is where you dragged the widgets (layout), in the browser's local storage.
+  - Keys:  J = jump scare   A = auto scares on/off   C = webcam on/off   V = vertical/landscape   E = edit layout (drag widgets)   H = hide/show controls
+  - Later, real hardware replaces the simulator by calling  ingest('hr', bpm),  ingest('gsr', microSiemens),
+    ingest('alpha', relativeAlpha0to1)  -- see the "DATA INPUT" section near the bottom.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Mono:wght@400;600&family=Special+Elite&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --panel: rgba(9, 6, 8, 0.80);
+    --panel-edge: rgba(176, 140, 132, 0.20);
+    --ink: #efe7dc;          /* bone white: all numbers and labels */
+    --ink-2: #b8aca1;
+    --muted: #7e736b;
+    --hr: #e2343f;           /* blood red */
+    --gsr: #86d27c;          /* sickly green */
+    --eeg: #ab9dff;          /* ghost violet */
+    --spike: #ff5a3c;
+    --label-font: "Special Elite", "Courier New", monospace;
+    --num-font: "Bebas Neue", "Impact", "Arial Narrow", sans-serif;
+    --mono: "IBM Plex Mono", Consolas, monospace;
+  }
+  html, body {
+    margin: 0; padding: 0; overflow: hidden;
+    width: 100%; height: 100%;
+    background: transparent;   /* OBS composites this over your game */
+  }
+
+  /* ---------- preview-only backdrop (never shown in OBS) ---------- */
+  #backdrop { position: fixed; z-index: 0; }
+  /* approximate areas a vertical-video app's own buttons and chat cover (shown only while editing layout) */
+  #safe { display: none; position: absolute; inset: 0; pointer-events: none; }
+  body.editing.vertical #safe { display: block; }
+  #safe i {
+    position: absolute; display: flex; align-items: center; justify-content: center; text-align: center;
+    background: rgba(255,255,255,0.10); outline: 2px dashed rgba(255,255,255,0.35);
+    font: 600 22px var(--mono); font-style: normal; color: rgba(255,255,255,0.75);
+  }
+  #backdrop.none { display: none; }
+  #backdrop.dark {
+    background:
+      radial-gradient(ellipse 40% 30% at 62% 58%, rgba(170, 190, 150, 0.16), transparent 70%),
+      radial-gradient(ellipse 25% 45% at 30% 70%, rgba(60, 80, 70, 0.35), transparent 70%),
+      radial-gradient(ellipse 70% 60% at 50% 100%, #1d2420, transparent),
+      linear-gradient(180deg, #0b0e0d 0%, #151b18 55%, #0a0c0b 100%);
+  }
+  #backdrop.bright {
+    background:
+      radial-gradient(circle at 78% 18%, #fff7d6 0 6%, transparent 7%),
+      linear-gradient(180deg, #8fc7ff 0%, #cfe8ff 48%, #9fd36d 49%, #6fae45 100%);
+  }
+  #backdrop.checker {
+    background: repeating-conic-gradient(#3a3a3a 0% 25%, #2a2a2a 0% 50%) 0 0 / 40px 40px;
+  }
+
+  /* ---------- the 1920x1080 stage ---------- */
+  #stage {
+    position: absolute; left: 0; top: 0;
+    width: 1920px; height: 1080px;
+    transform-origin: 0 0;
+    z-index: 1;
+  }
+
+  /* ---------- widgets ---------- */
+  .widget {
+    position: absolute;
+    width: 340px;
+    box-sizing: border-box;
+    padding: 12px 14px 12px;
+    background: var(--panel);
+    border: 1px solid var(--panel-edge);
+    border-radius: 6px;
+    color: var(--ink);
+    overflow: hidden;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.55), inset 0 0 40px rgba(0, 0, 0, 0.6);
+    transition: box-shadow 0.6s ease, border-color 0.6s ease, opacity 0.6s ease;
+    user-select: none;
+    transform: scale(var(--ws, 1)); transform-origin: 0 0;   /* --ws = widget size, set from the controls */
+  }
+  /* film grain */
+  .widget::before {
+    content: ""; position: absolute; inset: -20px; pointer-events: none; z-index: 3;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='140' height='140'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.9 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+    opacity: 0.05;
+    animation: grain 0.6s steps(3) infinite;
+    transition: opacity 0.4s ease;
+  }
+  /* scanlines + vignette */
+  .widget::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 2;
+    background:
+      repeating-linear-gradient(180deg, rgba(255,255,255,0.025) 0 1px, transparent 1px 3px),
+      radial-gradient(ellipse at 50% 40%, transparent 55%, rgba(0,0,0,0.55) 100%);
+  }
+  @keyframes grain {
+    0% { transform: translate(0, 0); } 33% { transform: translate(-9px, 6px); }
+    66% { transform: translate(7px, -8px); } 100% { transform: translate(0, 0); }
+  }
+
+  .head {
+    display: flex; align-items: center; justify-content: space-between;
+    font-family: var(--label-font);
+    font-size: 13px; letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--ink-2);
+    margin-bottom: 4px;
+    position: relative; z-index: 4;
+  }
+  .swatch { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; vertical-align: 1px; }
+  .tag {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em;
+    padding: 2px 6px; border-radius: 3px;
+    border: 1px solid rgba(255,255,255,0.14); color: var(--muted);
+    transition: all 0.2s ease;
+  }
+  .tag.alarm {
+    color: #fff; background: var(--spike); border-color: var(--spike);
+    box-shadow: 0 0 12px rgba(255, 90, 60, 0.7);
+    animation: blink 0.5s steps(2) infinite;
+  }
+  .tag.lost { color: var(--ink-2); border-color: var(--ink-2); }
+  @keyframes blink { 50% { opacity: 0.45; } }
+
+  .row { display: flex; align-items: flex-end; gap: 12px; position: relative; z-index: 4; }
+  .value {
+    font-family: var(--num-font); font-size: 56px; line-height: 0.9; color: var(--ink);
+    text-shadow: 0 2px 4px rgba(0,0,0,0.9);
+    min-width: 92px; font-variant-numeric: tabular-nums;
+  }
+  .unit { font-family: var(--mono); font-size: 12px; color: var(--ink-2); padding-bottom: 6px; }
+  .sub  { font-family: var(--mono); font-size: 11px; color: var(--muted); padding-bottom: 6px; margin-left: auto; text-align: right; line-height: 1.35; }
+  .sub b { color: var(--ink-2); font-weight: 600; }
+  canvas.chart { display: block; width: 312px; height: 62px; margin-top: 8px; position: relative; z-index: 4; }
+
+  /* heart icon */
+  .heart { width: 40px; height: 40px; flex: none; margin-bottom: 4px; filter: drop-shadow(0 0 6px rgba(226, 52, 63, 0.75)); }
+  .heart path { fill: var(--hr); }
+
+  /* HR widget heats up with BPM (--heat 0..1 set from script) */
+  #w-hr {
+    --heat: 0;
+    border-color: rgba(226, 52, 63, calc(0.18 + var(--heat) * 0.6));
+    box-shadow: 0 6px 24px rgba(0,0,0,0.55),
+                0 0 calc(var(--heat) * 30px) rgba(226, 52, 63, calc(var(--heat) * 0.55)),
+                inset 0 0 40px rgba(0,0,0,0.6);
+  }
+  #w-gsr.spiking { border-color: rgba(255, 90, 60, 0.75); box-shadow: 0 6px 24px rgba(0,0,0,0.55), 0 0 22px rgba(255, 90, 60, 0.45), inset 0 0 40px rgba(0,0,0,0.6); }
+
+  /* EEG gauge */
+  .gauge { flex: 1; padding-bottom: 6px; }
+  .track {
+    position: relative; height: 12px; border-radius: 6px;
+    background: rgba(255,255,255,0.07); overflow: hidden;
+  }
+  .fill {
+    position: absolute; left: 0; top: 0; bottom: 0; width: 0%;
+    border-radius: 6px; background: var(--eeg);
+    box-shadow: 0 0 10px rgba(171, 157, 255, 0.6);
+    transition: width 0.25s linear;
+  }
+  .ticks { position: absolute; inset: 0; background: repeating-linear-gradient(90deg, transparent 0 calc(10% - 2px), rgba(9,6,8,0.9) calc(10% - 2px) 10%); }
+  .ends { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 10px; color: var(--muted); margin-top: 4px; letter-spacing: 0.08em; }
+  #w-eeg.disrupted::before { opacity: 0.28; }
+  #w-eeg.disrupted .fill { background: #d8d2ff; }
+
+  /* webcam widget (off until you turn it on; live view only, never recorded) */
+  #w-cam { padding-bottom: 14px; }
+  #w-cam.off { display: none; }
+  .camframe { position: relative; z-index: 1; width: 312px; height: 176px; margin-top: 6px; border-radius: 3px; overflow: hidden; background: #050304; }
+  .camframe video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); filter: contrast(1.12) saturate(0.7) brightness(0.95); display: block; }
+  .camframe::after { content: ""; position: absolute; inset: 0; pointer-events: none; box-shadow: inset 0 0 46px 10px rgba(0,0,0,0.8); }
+  .cammsg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; padding: 14px; font: 11px/1.5 var(--mono); color: var(--ink-2); }
+  .cammsg:empty { display: none; }
+
+  /* startle glitch (triggered by the data, so it will work with real sensors too) */
+  .widget.startle { animation: shake 0.45s steps(2) 1; }
+  .widget.startle .value { text-shadow: -3px 0 rgba(255, 30, 60, 0.85), 3px 0 rgba(120, 255, 230, 0.45), 0 2px 4px rgba(0,0,0,0.9); }
+  @keyframes shake {
+    0% { transform: scale(var(--ws, 1)); } 20% { transform: scale(var(--ws, 1)) translate(-4px, 1px) skewX(-2deg); }
+    40% { transform: scale(var(--ws, 1)) translate(4px, -2px); } 60% { transform: scale(var(--ws, 1)) translate(-2px, 2px) skewX(1deg); }
+    80% { transform: scale(var(--ws, 1)) translate(2px, 0); } 100% { transform: scale(var(--ws, 1)); }
+  }
+  .widget.stale { opacity: 0.55; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .widget::before, .widget.startle, .tag.alarm { animation: none; }
+  }
+
+  /* layout editing */
+  body.editing .widget { cursor: grab; outline: 2px dashed rgba(239, 231, 220, 0.55); outline-offset: 4px; }
+  body.editing .widget.dragging { cursor: grabbing; outline-color: #fff; }
+  #edit-hint {
+    position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 20;
+    font: 600 13px var(--mono); color: #111; background: #efe7dc; padding: 8px 14px; border-radius: 4px;
+    display: none; box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  }
+  body.editing #edit-hint { display: block; }
+
+  /* ---------- preview control panel (hidden inside OBS) ---------- */
+  #controls {
+    position: fixed; left: 16px; bottom: 16px; z-index: 10;
+    width: 290px; max-width: calc(100vw - 32px); box-sizing: border-box;
+    padding: 14px; border-radius: 8px;
+    background: rgba(14, 11, 13, 0.94); border: 1px solid rgba(255,255,255,0.12);
+    color: var(--ink); font: 12px/1.4 var(--mono);
+    box-shadow: 0 10px 30px rgba(0,0,0,0.6);
+  }
+  #controls.hidden { display: none; }
+  #controls h2 { margin: 0 0 10px; font: 15px var(--label-font); letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-2); }
+  #controls button, #controls select {
+    font: 600 12px var(--mono); color: var(--ink); background: #241c20;
+    border: 1px solid rgba(255,255,255,0.16); border-radius: 4px; padding: 7px 10px; cursor: pointer;
+  }
+  #controls button:hover { background: #33282d; }
+  #controls .scare {
+    width: 100%; padding: 12px; margin-bottom: 10px; font: 22px var(--num-font); letter-spacing: 0.12em;
+    background: #5a0f16; border-color: #a3222c; color: #fff;
+  }
+  #controls .scare:hover { background: #7a141d; }
+  #controls .line { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+  #controls .line > label { flex: 1; color: var(--ink-2); }
+  #controls input[type=range] { width: 120px; accent-color: var(--hr); }
+  #controls .on { background: #1f3a1f; border-color: #4f8a4a; }
+  #controls .note { margin-top: 8px; color: var(--muted); font-size: 11px; }
+  #controls kbd { font: 11px var(--mono); padding: 0 4px; border: 1px solid rgba(255,255,255,0.25); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<div id="backdrop" class="none"></div>
+<div id="edit-hint">Drag the widgets &middot; press E (or Done) when finished</div>
+
+<div id="stage">
+  <div id="safe">
+    <i style="left:0;top:0;width:1080px;height:170px">App top bar (approx.)</i>
+    <i style="left:940px;top:170px;width:140px;height:1230px">buttons</i>
+    <i style="left:0;top:1400px;width:1080px;height:520px">App chat and controls (approx.)</i>
+  </div>
+  <!-- HEART RATE -->
+  <section class="widget" id="w-hr" data-key="hr">
+    <div class="head">
+      <span><span class="swatch" style="background:var(--hr)"></span>Heart rate</span>
+      <span class="tag" id="tag-hr">SIM</span>
+    </div>
+    <div class="row">
+      <svg class="heart" id="heart" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 21.3s-7.6-4.7-10.1-9.5C.3 8.6 2 4.4 6 4c2.2-.2 4.1 1 6 3.3 1.9-2.3 3.8-3.5 6-3.3 4 .4 5.7 4.6 4.1 7.8C19.6 16.6 12 21.3 12 21.3z"/>
+      </svg>
+      <div class="value" id="val-hr">--</div>
+      <div class="unit">BPM</div>
+      <div class="sub" id="sub-hr">&nbsp;</div>
+    </div>
+    <canvas class="chart" id="cv-hr"></canvas>
+  </section>
+
+  <!-- GSR -->
+  <section class="widget" id="w-gsr" data-key="gsr">
+    <div class="head">
+      <span><span class="swatch" style="background:var(--gsr)"></span>Skin response</span>
+      <span class="tag" id="tag-gsr">SIM</span>
+    </div>
+    <div class="row">
+      <div class="value" id="val-gsr">--</div>
+      <div class="unit">&micro;S</div>
+      <div class="sub" id="sub-gsr">skin<br>conductance</div>
+    </div>
+    <canvas class="chart" id="cv-gsr"></canvas>
+  </section>
+
+  <!-- EEG -->
+  <section class="widget" id="w-eeg" data-key="eeg">
+    <div class="head">
+      <span><span class="swatch" style="background:var(--eeg)"></span>Brain &middot; alpha</span>
+      <span class="tag" id="tag-eeg">SIM</span>
+    </div>
+    <div class="row">
+      <div class="value" id="val-eeg">--</div>
+      <div class="unit">%&alpha;</div>
+      <div class="gauge">
+        <div class="track"><div class="fill" id="fill-eeg"></div><div class="ticks"></div></div>
+        <div class="ends"><span>ALERT</span><span>CALM</span></div>
+      </div>
+    </div>
+    <canvas class="chart" id="cv-eeg"></canvas>
+  </section>
+
+  <!-- WEBCAM (hidden until switched on) -->
+  <section class="widget off" id="w-cam" data-key="cam">
+    <div class="head">
+      <span><span class="swatch" style="background:var(--ink)"></span>Subject</span>
+      <span class="tag" id="tag-cam">CAM</span>
+    </div>
+    <div class="camframe">
+      <video id="cam-video" autoplay muted playsinline></video>
+      <div class="cammsg" id="cam-msg"></div>
+    </div>
+  </section>
+</div>
+
+<aside id="controls">
+  <h2>Overlay controls</h2>
+  <button class="scare" id="btn-scare">Jump scare <kbd>J</kbd></button>
+  <div class="line">
+    <label for="tension">Tension (dread)</label>
+    <input type="range" id="tension" min="0" max="100" value="20">
+  </div>
+  <div class="line">
+    <label>Random scares</label>
+    <button id="btn-auto">Off <kbd>A</kbd></button>
+  </div>
+  <div class="line">
+    <label>Webcam</label>
+    <button id="btn-cam">Off <kbd>C</kbd></button>
+  </div>
+  <div class="line">
+    <label for="orient">Canvas</label>
+    <select id="orient">
+      <option value="landscape">Landscape 1920&times;1080</option>
+      <option value="vertical">Vertical 1080&times;1920</option>
+    </select>
+  </div>
+  <div class="line">
+    <label for="size">Widget size <span id="size-val"></span></label>
+    <input type="range" id="size" min="75" max="220" step="5" value="100">
+  </div>
+  <div class="line">
+    <label>Layout</label>
+    <button id="btn-edit">Edit <kbd>E</kbd></button>
+    <button id="btn-reset">Reset</button>
+  </div>
+  <div class="line">
+    <label for="bg">Preview backdrop</label>
+    <select id="bg">
+      <option value="dark">Dark game</option>
+      <option value="bright">Bright game</option>
+      <option value="checker">Checkerboard</option>
+      <option value="none">Transparent</option>
+    </select>
+  </div>
+  <div class="line">
+    <label>Hide this panel</label>
+    <button id="btn-hide">Hide <kbd>H</kbd></button>
+  </div>
+  <div class="note">Simulated data. Nothing is recorded or saved; only widget positions are remembered.</div>
+</aside>
+
+<script>
+/* =====================================================================
+   SETTINGS you might want to change
+   ===================================================================== */
+const CONFIG = {
+  // Default widget size (1 = 340px wide) and positions (top-left corner, in pixels) for each canvas shape.
+  landscape: { size: 1,   pos: { hr: { x: 1540, y: 40 }, gsr: { x: 1540, y: 222 }, eeg: { x: 1540, y: 404 }, cam: { x: 1540, y: 820 } } },   // 1920x1080
+  vertical:  { size: 1.3, pos: { hr: { x: 20, y: 200 },  gsr: { x: 478, y: 200 },  eeg: { x: 20, y: 437 },   cam: { x: 478, y: 437 } } },    // 1080x1920
+  // Seconds of history shown on each chart.
+  window: { hr: 60, gsr: 30, eeg: 30 },
+  // A GSR "spike" = conductance rising by at least `rise` microsiemens within `within` seconds.
+  gsrSpike: { rise: 0.35, within: 1.5 },
+  // Relative alpha below this counts as an "alpha drop" (EEG widget gets static).
+  alphaDrop: 0.12,
+  // Heart-rate jump (bpm within 5 s) that triggers the startle glitch.
+  hrJump: 12,
+};
+
+/* =====================================================================
+   In-memory buffers (rolling windows, oldest points discarded)
+   ===================================================================== */
+const nowS = () => performance.now() / 1000;
+class Series {
+  constructor(win) { this.win = win; this.t = []; this.v = []; }
+  push(t, v) {
+    this.t.push(t); this.v.push(v);
+    while (this.t.length && this.t[0] < t - this.win - 3) { this.t.shift(); this.v.shift(); }
+  }
+  get last() { return this.v[this.v.length - 1]; }
+  get lastT() { return this.t[this.t.length - 1]; }
+  minSince(t0) {
+    let m = Infinity, mt = null;
+    for (let i = this.t.length - 1; i >= 0 && this.t[i] >= t0; i--) if (this.v[i] < m) { m = this.v[i]; mt = this.t[i]; }
+    return { v: m, t: mt };
+  }
+  valueAt(t) { // most recent value at or before t
+    for (let i = this.t.length - 1; i >= 0; i--) if (this.t[i] <= t) return this.v[i];
+    return undefined;
+  }
+}
+const S = { hr: new Series(CONFIG.window.hr), gsr: new Series(CONFIG.window.gsr), eeg: new Series(CONFIG.window.eeg) };
+const spikes = [];          // GSR spike regions for highlighting
+let activeSpike = null;
+let alphaSmooth = null, alphaT = null;
+const timers = {};
+
+const $ = id => document.getElementById(id);
+
+/* =====================================================================
+   DATA INPUT: every reading (simulated now, real later) goes through here
+   ===================================================================== */
+function ingest(channel, value, t = nowS()) {
+  if (channel === 'hr') {
+    const prevMin = S.hr.minSince(t - 5).v;
+    S.hr.push(t, value);
+    if (isFinite(prevMin) && value - prevMin >= CONFIG.hrJump) startle('w-hr', 8);
+  }
+  else if (channel === 'gsr') {
+    const low = S.gsr.minSince(t - CONFIG.gsrSpike.within);
+    S.gsr.push(t, value);
+    const prev = spikes[spikes.length - 1];
+    if (!activeSpike && isFinite(low.v) && value - low.v >= CONFIG.gsrSpike.rise) {
+      if (prev && t - prev.end < 6) { activeSpike = prev; prev.end = null; }     // still the same response: extend it
+      else { activeSpike = { start: low.t, base: low.v, peak: value, peakT: t, end: null }; spikes.push(activeSpike); }
+      flag('gsr', 'SPIKE', 4000);
+      $('w-gsr').classList.add('spiking');
+      clearTimeout(timers.spikeGlow);
+      timers.spikeGlow = setTimeout(() => $('w-gsr').classList.remove('spiking'), 4000);
+      startle('w-gsr', 4);
+    }
+    if (activeSpike) {
+      if (value > activeSpike.peak) { activeSpike.peak = value; activeSpike.peakT = t; }
+      else if (value < activeSpike.peak - 0.05 || t - activeSpike.peakT > 1.5) { activeSpike.end = activeSpike.peakT; activeSpike = null; }
+    }
+    while (spikes.length && spikes[0].end !== null && spikes[0].end < t - CONFIG.window.gsr - 2) spikes.shift();
+  }
+  else if (channel === 'alpha') {
+    // light smoothing (~0.8 s) because raw band power is jumpy
+    if (alphaSmooth === null) alphaSmooth = value;
+    else alphaSmooth += (value - alphaSmooth) * (1 - Math.exp(-(t - alphaT) / 0.8));
+    alphaT = t;
+    S.eeg.push(t, alphaSmooth);
+    const low = alphaSmooth < CONFIG.alphaDrop;
+    $('w-eeg').classList.toggle('disrupted', low);
+    if (low) flag('eeg', 'α DROP', 1500);
+  }
+}
+
+/* tag in widget header: SIM normally, alarms override briefly */
+const tagUntil = {};
+function flag(key, text, ms) {
+  tagUntil[key] = performance.now() + ms;
+  const el = $('tag-' + key);
+  el.textContent = text; el.className = 'tag alarm';
+}
+const lastStartle = {};
+function startle(id, cooldownS) {
+  const t = nowS();
+  if (lastStartle[id] && t - lastStartle[id] < cooldownS) return;
+  lastStartle[id] = t;
+  const el = $(id);
+  el.classList.remove('startle'); void el.offsetWidth; el.classList.add('startle');
+  setTimeout(() => el.classList.remove('startle'), 600);
+}
+document.querySelectorAll('.widget').forEach(w => w.addEventListener('animationend', e => { if (e.animationName === 'shake') w.classList.remove('startle'); }));
+
+/* =====================================================================
+   SIMULATOR (replace with real sources later)
+   ===================================================================== */
+const rnd = (a, b) => a + Math.random() * (b - a);
+function gauss() { let u = 0, v = 0; while (!u) u = Math.random(); while (!v) v = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
+// skin conductance response shape: fast rise, slow recovery, peak normalised to 1
+function scrShape(t, t1 = 0.75, t2 = 5) {
+  if (t <= 0) return 0;
+  const tp = (t1 * t2 / (t2 - t1)) * Math.log(t2 / t1);
+  const peak = Math.exp(-tp / t2) - Math.exp(-tp / t1);
+  return (Math.exp(-t / t2) - Math.exp(-t / t1)) / peak;
+}
+const sim = {
+  tension: 0.2, auto: false, nextAuto: 0,
+  hrBase: 76, gsrTonic: 4.4, tonicBump: 0, alpha: 0.25,
+  scares: [], scrs: [], lastHrEmit: 0, t: nowS(),
+};
+function jumpScare() {
+  const t = nowS(), k = rnd(0.8, 1.3);
+  sim.scares.push({ t0: t + rnd(0.2, 0.5), k });                            // heart: kicks in within a beat
+  sim.scrs.push({ t0: t + rnd(1.4, 2.4), amp: rnd(1.3, 2.6) * k });         // skin: 1.5-2.5 s latency
+  sim.tonicBump += 0.5 * k;                                                 // lingering arousal
+  flashButton();
+}
+function simStep() {
+  const t = nowS(), dt = Math.min(0.5, t - sim.t); sim.t = t;
+  const T = sim.tension;
+
+  if (sim.auto && t > sim.nextAuto) { jumpScare(); sim.nextAuto = t + rnd(25, 60); }
+
+  // HEART RATE: drifting baseline + breathing ripple + startle response; Pulsoid-style 1 Hz integer updates
+  sim.hrBase += 0.05 * ((74 + 22 * T) - sim.hrBase) * dt + 0.8 * Math.sqrt(dt) * gauss();
+  let scareHr = 0;
+  sim.scares = sim.scares.filter(s => t - s.t0 < 90);
+  for (const s of sim.scares) { const u = t - s.t0; if (u > 0) scareHr += 36 * s.k * (1 - Math.exp(-u / 1.0)) * Math.exp(-u / 16); }
+  if (t - sim.lastHrEmit >= 1) {
+    sim.lastHrEmit = t;
+    const bpm = sim.hrBase + 2.5 * Math.sin(2 * Math.PI * 0.23 * t) + scareHr + 0.6 * gauss();
+    ingest('hr', Math.round(Math.max(45, Math.min(195, bpm))), t);
+  }
+
+  // GSR: slow tonic level + small spontaneous responses + big scare responses; 10 Hz (Arduino-like)
+  sim.gsrTonic += 0.02 * ((4.2 + 3 * T) - sim.gsrTonic) * dt + 0.03 * Math.sqrt(dt) * gauss();
+  sim.tonicBump *= Math.exp(-dt / 50);
+  if (Math.random() < ((1.5 + 4 * T) / 60) * dt) sim.scrs.push({ t0: t, amp: rnd(0.04, 0.25) });
+  sim.scrs = sim.scrs.filter(s => t - s.t0 < 40);
+  let phasic = 0;
+  for (const s of sim.scrs) phasic += s.amp * scrShape(t - s.t0);
+  ingest('gsr', Math.max(0.5, sim.gsrTonic + sim.tonicBump + phasic + 0.008 * gauss()), t);
+
+  // EEG relative alpha: noisy, lower under tension, drops sharply on a scare then recovers; 10 Hz (Mind Monitor-like)
+  sim.alpha += 0.4 * ((0.25 - 0.09 * T) - sim.alpha) * dt + 0.05 * Math.sqrt(dt) * gauss();
+  let dip = 0;
+  for (const s of sim.scares) { const u = t - s.t0; if (u > 0) dip += 0.11 * s.k * (1 - Math.exp(-u / 0.25)) * Math.exp(-u / 7); }
+  ingest('alpha', Math.max(0.03, Math.min(0.7, sim.alpha - dip)), t);
+}
+setInterval(simStep, 100);
+
+/* =====================================================================
+   HEART ICON: beats at the current BPM
+   ===================================================================== */
+function beat() {
+  const bpm = S.hr.last || 75;
+  const interval = 60000 / bpm;
+  $('heart').animate(
+    [{ transform: 'scale(1)' }, { transform: 'scale(1.24)', offset: 0.14 }, { transform: 'scale(0.98)', offset: 0.32 },
+     { transform: 'scale(1.1)', offset: 0.46 }, { transform: 'scale(1)' }],
+    { duration: Math.min(650, interval * 0.85), easing: 'ease-out' });
+  setTimeout(beat, interval);
+}
+beat();
+
+/* =====================================================================
+   CHARTS (canvas)
+   ===================================================================== */
+const charts = {
+  hr:  { cv: $('cv-hr'),  series: S.hr,  win: CONFIG.window.hr,  lag: 1.0, color: '#e2343f', minSpan: 24, pad: 4,    fmt: v => Math.round(v) },
+  gsr: { cv: $('cv-gsr'), series: S.gsr, win: CONFIG.window.gsr, lag: 0.1, color: '#86d27c', minSpan: 1.0, pad: 0.15, fmt: v => v.toFixed(1), spikes: true },
+  eeg: { cv: $('cv-eeg'), series: S.eeg, win: CONFIG.window.eeg, lag: 0.1, color: '#ab9dff', fixed: [0, 0.5],      fmt: v => Math.round(v * 100) + '%' },
+};
+let ratio = 1;
+function sizeCharts(ws = 1) {   // keep charts sharp when widgets are enlarged
+  ratio = Math.max(1, window.devicePixelRatio || 1) * ws;
+  for (const c of Object.values(charts)) {
+    c.w = 312; c.h = 62;
+    c.cv.width = Math.round(c.w * ratio); c.cv.height = Math.round(c.h * ratio);
+    c.ctx = c.cv.getContext('2d');
+  }
+}
+sizeCharts();
+function hexA(hex, a) { const n = parseInt(hex.slice(1), 16); return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`; }
+
+function drawChart(c, now) {
+  const { ctx, w, h, series } = c;
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const tEnd = now - c.lag, t0 = tEnd - c.win;
+  const right = w - 6, top = 4, bottom = h - 4;
+
+  // y-range: fixed, or auto with smoothing so it doesn't jump around
+  let lo, hi;
+  if (c.fixed) [lo, hi] = c.fixed;
+  else {
+    let mn = Infinity, mx = -Infinity;
+    for (let i = 0; i < series.t.length; i++) if (series.t[i] >= t0 - 1) { mn = Math.min(mn, series.v[i]); mx = Math.max(mx, series.v[i]); }
+    if (!isFinite(mn)) return;
+    mn -= c.pad; mx += c.pad;
+    if (mx - mn < c.minSpan) { const mid = (mx + mn) / 2; mn = mid - c.minSpan / 2; mx = mid + c.minSpan / 2; }
+    if (c.lo === undefined) { c.lo = mn; c.hi = mx; }
+    c.lo += (mn - c.lo) * 0.06; c.hi += (mx - c.hi) * 0.06;
+    c.lo = Math.min(c.lo, mn); c.hi = Math.max(c.hi, mx);   // never clip the line
+    lo = c.lo; hi = c.hi;
+  }
+  const X = t => (t - t0) / c.win * right;
+  const Y = v => bottom - (v - lo) / (hi - lo) * (bottom - top);
+
+  // recessive grid: top, middle, bottom
+  ctx.strokeStyle = 'rgba(239,231,220,0.07)'; ctx.lineWidth = 1;
+  for (const f of [0, 0.5, 1]) { const y = Math.round(top + f * (bottom - top)) + 0.5; ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke(); }
+
+  // GSR spike highlight bands
+  if (c.spikes) {
+    for (const s of spikes) {
+      const x1 = Math.max(0, X(s.start)), x2 = Math.min(right, X(s.end ?? tEnd));
+      if (x2 < 0 || x1 > right) continue;
+      const g = ctx.createLinearGradient(0, 0, 0, h);
+      g.addColorStop(0, 'rgba(255,90,60,0.32)'); g.addColorStop(1, 'rgba(255,90,60,0.04)');
+      ctx.fillStyle = g; ctx.fillRect(x1, 0, Math.max(2, x2 - x1), h);
+      ctx.fillStyle = '#ff5a3c'; ctx.fillRect(x1, 0, Math.max(2, x2 - x1), 2);
+      ctx.font = '600 10px "IBM Plex Mono", Consolas, monospace';
+      ctx.fillStyle = '#efe7dc'; ctx.textBaseline = 'top';
+      const label = '+' + (s.peak - s.base).toFixed(1);
+      ctx.fillText(label, Math.min(Math.max(2, x1 + 3), right - 30), 5);
+    }
+  }
+
+  // collect visible points
+  const pts = [];
+  for (let i = 0; i < series.t.length; i++) {
+    if (series.t[i] < t0 - 2 || series.t[i] > tEnd + 0.5) continue;
+    pts.push([X(series.t[i]), Y(series.v[i])]);
+  }
+  if (pts.length < 2) return;
+
+  // area fill
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, 0, right + 1, h); ctx.clip();
+  const grad = ctx.createLinearGradient(0, top, 0, bottom);
+  grad.addColorStop(0, hexA(c.color, 0.30)); grad.addColorStop(1, hexA(c.color, 0));
+  ctx.beginPath(); ctx.moveTo(pts[0][0], bottom);
+  for (const p of pts) ctx.lineTo(p[0], p[1]);
+  ctx.lineTo(pts[pts.length - 1][0], bottom); ctx.closePath();
+  ctx.fillStyle = grad; ctx.fill();
+
+  // line with a faint glow
+  ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]);
+  for (const p of pts) ctx.lineTo(p[0], p[1]);
+  ctx.strokeStyle = c.color; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.shadowColor = c.color; ctx.shadowBlur = 6; ctx.stroke();
+  ctx.restore();
+
+  // live end point
+  const [lx, ly] = pts[pts.length - 1];
+  ctx.beginPath(); ctx.arc(lx, ly, 4, 0, Math.PI * 2);
+  ctx.fillStyle = c.color; ctx.fill();
+  ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(9,6,8,0.9)'; ctx.stroke();
+
+  // range labels (muted ink, left edge)
+  ctx.font = '10px "IBM Plex Mono", Consolas, monospace';
+  ctx.fillStyle = 'rgba(184,172,161,0.75)';
+  ctx.textBaseline = 'top'; ctx.fillText(c.fmt(hi), 2, top + 1);
+  ctx.textBaseline = 'bottom'; ctx.fillText(c.fmt(lo), 2, bottom - 1);
+}
+
+/* =====================================================================
+   RENDER LOOP: numbers, gauge, heat, charts
+   ===================================================================== */
+const shown = {};
+function setText(id, text) { if (shown[id] !== text) { shown[id] = text; $(id).innerHTML = text; } }
+
+function render() {
+  const now = nowS();
+
+  // HR
+  const hr = S.hr.last;
+  if (hr !== undefined) {
+    setText('val-hr', String(hr));
+    const past = S.hr.valueAt(now - 6);
+    let trend = '&nbsp;';
+    if (past !== undefined) {
+      const d = hr - past;
+      trend = d >= 3 ? `<b>&#9650; ${d}</b><br>last 5s` : d <= -3 ? `<b>&#9660; ${-d}</b><br>last 5s` : 'steady';
+    }
+    setText('sub-hr', trend);
+    $('w-hr').style.setProperty('--heat', Math.max(0, Math.min(1, (hr - 72) / 45)).toFixed(3));
+  }
+  // GSR
+  const g = S.gsr.last;
+  if (g !== undefined) setText('val-gsr', g.toFixed(2));
+  // EEG
+  const a = S.eeg.last;
+  if (a !== undefined) {
+    setText('val-eeg', String(Math.round(a * 100)));
+    $('fill-eeg').style.width = Math.min(100, a / 0.5 * 100).toFixed(1) + '%';
+  }
+
+  // header tags: revert alarms; show NO SIGNAL if a source goes quiet for 5 s
+  for (const [key, ser] of [['hr', S.hr], ['gsr', S.gsr], ['eeg', S.eeg]]) {
+    const el = $('tag-' + key);
+    const stale = ser.lastT === undefined || now - ser.lastT > 5;
+    $('w-' + key).classList.toggle('stale', stale);
+    if (stale) { if (el.textContent !== 'NO SIGNAL') { el.textContent = 'NO SIGNAL'; el.className = 'tag lost'; } }
+    else if (!(tagUntil[key] > performance.now()) && el.textContent !== 'SIM') { el.textContent = 'SIM'; el.className = 'tag'; }
+  }
+
+  for (const c of Object.values(charts)) drawChart(c, now);
+  requestAnimationFrame(render);
+}
+requestAnimationFrame(render);
+
+/* =====================================================================
+   STAGE SCALING (fits the 1920x1080 canvas into any preview window)
+   ===================================================================== */
+const params = new URLSearchParams(location.search);
+const inOBS = !!window.obsstudio;
+const stage = $('stage');
+const clone = o => JSON.parse(JSON.stringify(o));
+
+// Remembered between sessions: canvas shape, widget size and positions. Never any readings.
+const STORE_KEY = 'bio-overlay-layout-v2';
+const store = { orientation: null, landscape: clone(CONFIG.landscape), vertical: clone(CONFIG.vertical) };
+try {
+  const s = JSON.parse(localStorage.getItem(STORE_KEY));
+  if (s) {
+    if (s.orientation) store.orientation = s.orientation;
+    for (const o of ['landscape', 'vertical']) if (s[o]) { Object.assign(store[o].pos, s[o].pos); if (s[o].size) store[o].size = s[o].size; }
+  }
+} catch (e) {}
+function saveLayout() { try { localStorage.setItem(STORE_KEY, JSON.stringify(store)); } catch (e) {} }
+
+// Which shape? A  ?orientation=vertical  in the address wins; inside OBS it follows the shape of the
+// Browser Source (taller than wide = vertical); in the browser preview it uses the Canvas menu.
+function pickOrientation() {
+  const q = params.get('orientation');
+  if (q === 'vertical' || q === 'landscape') return q;
+  if (inOBS) return window.innerHeight > window.innerWidth ? 'vertical' : 'landscape';
+  return store.orientation || 'landscape';
+}
+let orientation = 'landscape', SW = 1920, SH = 1080, scale = 1, layout = store.landscape;
+
+function fit() {
+  scale = Math.min(window.innerWidth / SW, window.innerHeight / SH);
+  const left = (window.innerWidth - SW * scale) / 2, top = (window.innerHeight - SH * scale) / 2;
+  stage.style.transform = `scale(${scale})`;
+  stage.style.left = left + 'px'; stage.style.top = top + 'px';
+  const b = $('backdrop').style;
+  b.left = left + 'px'; b.top = top + 'px'; b.width = SW * scale + 'px'; b.height = SH * scale + 'px';
+}
+function applyLayout() {
+  stage.style.setProperty('--ws', layout.size);
+  document.querySelectorAll('.widget').forEach(w => {
+    const p = layout.pos[w.dataset.key]; w.style.left = p.x + 'px'; w.style.top = p.y + 'px';
+  });
+  sizeCharts(layout.size);
+  $('size').value = Math.round(layout.size * 100);
+  $('size-val').textContent = Math.round(layout.size * 100) + '%';
+}
+function setOrientation(o) {
+  orientation = o; SW = o === 'vertical' ? 1080 : 1920; SH = o === 'vertical' ? 1920 : 1080;
+  stage.style.width = SW + 'px'; stage.style.height = SH + 'px';
+  document.body.classList.toggle('vertical', o === 'vertical');
+  $('orient').value = o;
+  layout = store[o];
+  applyLayout(); fit();
+}
+window.addEventListener('resize', () => {
+  const o = pickOrientation();
+  if (inOBS && o !== orientation) setOrientation(o); else fit();
+});
+
+/* =====================================================================
+   LAYOUT: drag widgets in edit mode; only positions are remembered
+   ===================================================================== */
+let editing = false;
+function setEditing(on) {
+  editing = on; document.body.classList.toggle('editing', on);
+  $('btn-edit').innerHTML = on ? 'Done <kbd>E</kbd>' : 'Edit <kbd>E</kbd>';
+  $('btn-edit').classList.toggle('on', on);
+}
+document.querySelectorAll('.widget').forEach(w => {
+  w.addEventListener('pointerdown', e => {
+    if (!editing) return;
+    e.preventDefault(); w.setPointerCapture(e.pointerId); w.classList.add('dragging');
+    const p = layout.pos[w.dataset.key], start = { x: e.clientX, y: e.clientY, px: p.x, py: p.y };
+    const move = ev => {
+      p.x = Math.round(Math.max(0, Math.min(SW - w.offsetWidth * layout.size, start.px + (ev.clientX - start.x) / scale)));
+      p.y = Math.round(Math.max(0, Math.min(SH - w.offsetHeight * layout.size, start.py + (ev.clientY - start.y) / scale)));
+      w.style.left = p.x + 'px'; w.style.top = p.y + 'px';
+    };
+    const up = () => { w.classList.remove('dragging'); w.removeEventListener('pointermove', move); w.removeEventListener('pointerup', up); saveLayout(); };
+    w.addEventListener('pointermove', move); w.addEventListener('pointerup', up);
+  });
+});
+
+/* =====================================================================
+   CONTROLS + KEYBOARD
+   ===================================================================== */
+const showControls = params.has('controls') ? params.get('controls') !== '0' : !inOBS;
+$('controls').classList.toggle('hidden', !showControls);
+const bgSel = $('bg');
+function setBackdrop(v) {
+  bgSel.value = v; $('backdrop').className = v;
+  document.documentElement.style.background = v === 'none' ? '' : '#141113';   // grey surround in preview only
+}
+setBackdrop(inOBS ? 'none' : 'dark');
+bgSel.addEventListener('change', () => setBackdrop(bgSel.value));
+
+function chooseOrientation(o) { store.orientation = o; setOrientation(o); saveLayout(); }
+$('orient').addEventListener('change', e => chooseOrientation(e.target.value));
+$('size').addEventListener('input', e => { layout.size = e.target.value / 100; applyLayout(); saveLayout(); });
+
+function flashButton() { const b = $('btn-scare'); b.animate([{ background: '#d3202e' }, { background: '#5a0f16' }], { duration: 500 }); }
+function toggleAuto() {
+  sim.auto = !sim.auto; sim.nextAuto = nowS() + rnd(8, 20);
+  $('btn-auto').innerHTML = (sim.auto ? 'On' : 'Off') + ' <kbd>A</kbd>';
+  $('btn-auto').classList.toggle('on', sim.auto);
+}
+/* webcam: live view only. The video goes straight from the camera to the screen; nothing is recorded or sent. */
+let camStream = null;
+async function toggleCam() {
+  const w = $('w-cam'), v = $('cam-video'), msg = $('cam-msg');
+  if (camStream) {                                   // turn off: stop the camera completely (its light goes out)
+    camStream.getTracks().forEach(tr => tr.stop());
+    camStream = null; v.srcObject = null; w.classList.add('off');
+  } else {
+    w.classList.remove('off'); msg.textContent = 'Waiting for camera permission…';
+    try {
+      camStream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+      v.srcObject = camStream; msg.textContent = '';
+    } catch (err) {
+      msg.textContent = inOBS
+        ? 'Camera is not available inside an OBS browser source. Add your webcam in OBS as a Video Capture Device instead.'
+        : 'Could not open the camera (' + (err && err.name || 'error') + '). Allow camera access in the browser and close other apps using it.';
+    }
+  }
+  const on = !w.classList.contains('off');
+  $('btn-cam').innerHTML = (on ? 'On' : 'Off') + ' <kbd>C</kbd>';
+  $('btn-cam').classList.toggle('on', on);
+}
+$('btn-cam').addEventListener('click', toggleCam);
+$('btn-scare').addEventListener('click', jumpScare);
+$('btn-auto').addEventListener('click', toggleAuto);
+$('btn-edit').addEventListener('click', () => setEditing(!editing));
+$('btn-reset').addEventListener('click', () => { store[orientation] = clone(CONFIG[orientation]); layout = store[orientation]; applyLayout(); saveLayout(); });
+$('btn-hide').addEventListener('click', () => $('controls').classList.add('hidden'));
+$('tension').addEventListener('input', e => { sim.tension = e.target.value / 100; });
+
+window.addEventListener('keydown', e => {
+  if (e.repeat || e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT') return;
+  const k = e.key.toLowerCase();
+  if (k === 'j' || k === ' ') { e.preventDefault(); jumpScare(); }
+  else if (k === 'a') toggleAuto();
+  else if (k === 'c') toggleCam();
+  else if (k === 'v') chooseOrientation(orientation === 'vertical' ? 'landscape' : 'vertical');
+  else if (k === 'e') setEditing(!editing);
+  else if (k === 'h') $('controls').classList.toggle('hidden');
+});
+
+setOrientation(pickOrientation());   // first layout, once everything above exists
+
+/* =====================================================================
+   LATER, WITH REAL HARDWARE (notes only, nothing here runs)
+   - Pulsoid: open its real-time WebSocket with your token and call ingest('hr', data.heart_rate).
+   - Grove GSR on Arduino: browsers in OBS can't read USB serial directly, so a tiny bridge program
+     reads the serial port and forwards readings over a local WebSocket. Seeed's formula:
+     resistance = ((1024 + 2*reading) * 10000) / (512 - reading);  microsiemens = 1e6 / resistance.
+   - Mind Monitor: it sends OSC over UDP, so the same kind of bridge forwards /muse/elements/alpha_relative
+     (or computes relative alpha from the absolute bands) and you call ingest('alpha', value).
+   Then stop the simulator by removing the  setInterval(simStep, 100)  line.
+   ===================================================================== */
+</script>
+</body>
+</html>
